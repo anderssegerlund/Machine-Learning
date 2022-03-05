@@ -1,0 +1,6 @@
+### Ignore data
+
+# Ignore data in all subfolders
+**/*/Data
+# Ignore data in root folder
+/Data
