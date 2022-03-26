@@ -4,3 +4,7 @@
 **/*/Data
 # Ignore data in root folder
 /Data
+
+# ipynb checkpoints
+
+**/*.ipynb_checkpoints
