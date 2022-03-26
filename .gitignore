@@ -8,3 +8,7 @@
 # ipynb checkpoints
 
 **/*.ipynb_checkpoints
+
+
+# Neural network saved state
+**/*.pt
