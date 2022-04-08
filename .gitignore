@@ -12,6 +12,3 @@
 
 # Neural network saved state
 **/*.pt
-
-
-**/*.txt
