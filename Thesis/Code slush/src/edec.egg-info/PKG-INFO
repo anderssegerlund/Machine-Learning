@@ -1,0 +1,18 @@
+Metadata-Version: 2.1
+Name: edec
+Version: 0.0.0
+Summary: UNKNOWN
+Home-page: https://github.com/volvo-cars/rdaai-mt-battery-ai
+Author: 
+Author-email: 
+License: UNKNOWN
+Platform: UNKNOWN
+Requires-Python: ~=3.9.0
+Provides-Extra: base
+Provides-Extra: test
+Provides-Extra: lint
+Provides-Extra: formatter
+Provides-Extra: dev
+
+UNKNOWN
+

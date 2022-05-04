@@ -1,0 +1,1435 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Imports"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 35,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Nothing done.\n"
+     ]
+    }
+   ],
+   "source": [
+    "%reset"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import edec.afterprocessing as ap\n",
+    "import pandas as pd\n",
+    "import torch\n",
+    "from torch.utils.data import DataLoader\n",
+    "import torch.nn as nn\n",
+    "import torch.nn.functional as F\n",
+    "from torch.nn.functional import normalize\n",
+    "import seaborn as sns\n",
+    "import matplotlib.pyplot as plt\n",
+    "%matplotlib inline"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": []
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Functions (Dessa kan importeras via edec)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 3,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def import_labels(label=1, db=\"df.db\",n_random=10):\n",
+    "        \"\"\"\n",
+    "        This function import all cars from sql with stated label 0/1\n",
+    "        Example: Car \"abc\" and \"bcd\" has at some point been labeled with a Cell fail 1\n",
+    "\n",
+    "        tin_an  Fail\n",
+    "        \"abc\"   0\n",
+    "        \"abc\"   1\n",
+    "        \"abc\"   0\n",
+    "        \"bcd\"   0\n",
+    "        \"bcd\"   0\n",
+    "        \"bcd\"   1\n",
+    "        \"\"\"\n",
+    "        # Select all cell fails\n",
+    "        # limit the result to only x for non fail cars\n",
+    "        #if label == 0:\n",
+    "        #        lim = \"LIMIT 3\"\n",
+    "        #else:\n",
+    "        #        lim = \"\"\n",
+    "\n",
+    "        ## SELECT ALL UNIQUE CARS WITH 0 / 1\n",
+    "        \"\"\"\n",
+    "        First sub query select lim random number of tin numbers with label \n",
+    "        Seccond query select timestamp, sorted soc etc from the sub_query\n",
+    "        \n",
+    "        \"\"\"\n",
+    "\n",
+    "        #if label == 0:\n",
+    "                #n_random = 100\n",
+    "        #if label == 1:\n",
+    "               # n_random = 1000\n",
+    "                \n",
+    "        sub_query  = f\"SELECT DISTINCT(main_table.tin_an) FROM main_table \\\n",
+    "                        INNER JOIN cell_fail \\\n",
+    "                        ON main_table.rid = cell_fail.rid \\\n",
+    "                        AND cell_fail.Fail = {label} \\\n",
+    "                        ORDER BY RANDOM() \\\n",
+    "                         LIMIT {n_random}\"\n",
+    "\n",
+    "        query = f\"SELECT main_table.tin_an, [timestamp], [Sorted_SOC], cell_fail.Fail FROM main_table \\\n",
+    "                INNER JOIN cell_fail \\\n",
+    "                ON main_table.rid = cell_fail.rid \\\n",
+    "                WHERE [tin_an] in ({sub_query})\"\n",
+    "\n",
+    "        df = ap.load_sql(query , db=db)\n",
+    "\n",
+    "        # Change to Timestamp format\n",
+    "        df[\"timestamp\"] = pd.to_datetime(df[\"timestamp\"])\n",
+    "        # Sort by timestamp\n",
+    "        df = df.sort_values(by=[\"timestamp\"],ascending=True)\n",
+    "\n",
+    "        # Print import result\n",
+    "        n_unique = len(df[\"tin_an\"].unique())\n",
+    "        print(f\"{n_unique} Unique cars with label {label} has been imported with {len(df)} subsamples\")\n",
+    "        return df\n",
+    "\n",
+    "def sample_to_tensor_x(df_tensor, sub_samples=3):\n",
+    "    x = torch.zeros(sub_samples,108)\n",
+    "    i_from = len(df_tensor) - sub_samples\n",
+    "    i_to =  len(df_tensor)\n",
+    "\n",
+    "    for tensor_i, df_i in enumerate(reversed(range(i_from, i_to))):\n",
+    "        carcell_voltage = df_tensor[\"Sorted_SOC\"].iloc[df_i]     \n",
+    "        x[tensor_i] = torch.FloatTensor(carcell_voltage)\n",
+    "    return x\n",
+    "\n",
+    "\n",
+    "def create_dataset(db=\"df.db\", parameters=None, normalize_data=False, show_rundetails=False):\n",
+    "    # Output\n",
+    "    data = []\n",
+    "    run_details = {\"Fail types loaded\":0, \n",
+    "                    \"Samples removed\":{\n",
+    "                                        0:0, \n",
+    "                                        1:0,\n",
+    "                                        },\n",
+    "                    \"Dropped tin\":{\n",
+    "                                    0:[],\n",
+    "                                    1:[]},\n",
+    "                                    }\n",
+    "\n",
+    "    # Paramters\n",
+    "    roll = parameters[\"roll\"]\n",
+    "    sub_sample = parameters[\"Sub sample\"]\n",
+    "    drop_sample = parameters[\"drop_sample\"]+1 #Definierar 0 som ingen drop, men måste lägga till 1 pga att loopen f\n",
+    "\n",
+    "    for fail in range(2): \n",
+    "        run_details[\"Fail types loaded\"] +=1\n",
+    "        print(f\"Run {fail} started\")\n",
+    "        # Create df with 0 and 1\n",
+    "        df = import_labels(label=fail, db=db, n_random = parameters[\"nRandom samples\"][fail])\n",
+    "        cars = df[\"tin_an\"].unique()\n",
+    "        print(f\"{len(cars)} Cars in df\")\n",
+    "        for i_car in range(len(cars)): # Change to 2\n",
+    "\n",
+    "            # Get unique tin_number for fail / healthy\n",
+    "            df_tin = df[df[\"tin_an\"] == cars[i_car]]\n",
+    "            df_tin = df_tin.reset_index()\n",
+    "            if fail == 1:\n",
+    "                max_index  = df_tin[df_tin[\"Fail\"] == 1].index.values\n",
+    "                last_idx = max_index[-1]\n",
+    "                df_tensor = df_tin[:last_idx+1]\n",
+    "            else:\n",
+    "                last_idx = len(df_tin) +1 #-1\n",
+    "                df_tensor = df_tin[:last_idx+1]\n",
+    "\n",
+    "            ### Create rolling\n",
+    "            last_idx_temp = last_idx\n",
+    "            for r in range(1,roll+1):\n",
+    "\n",
+    "                if r == 1:\n",
+    "                    r_end = None\n",
+    "                else:\n",
+    "                    r_end = -r + 1\n",
+    "\n",
+    "                df_tensor_short = df_tensor[-r-sub_sample+1:r_end]\n",
+    "                last_idx_temp -= 1\n",
+    "\n",
+    "                # Create database\n",
+    "                if (len(df_tensor_short) >= (sub_sample)) & (r >= (drop_sample)):\n",
+    "                    x = sample_to_tensor_x(df_tensor_short, sub_samples=sub_sample)\n",
+    "                    if normalize_data:\n",
+    "                        # Normalize by xi - min(x) / (max(x) - min(x))\n",
+    "                        min_i = x.min().item()\n",
+    "                        max_i = x.max().item()\n",
+    "                        x = (x-min_i)/(max_i - min_i)\n",
+    "                    y = fail\n",
+    "                    data.append((x,y))\n",
+    "                if (len(df_tensor_short) < (sub_sample)):\n",
+    "                    run_details[\"Samples removed\"][fail] +=1\n",
+    "                    run_details[\"Dropped tin\"][fail].append(df_tensor[\"tin_an\"].unique()[0])\n",
+    "                    #continue\n",
+    "        if show_rundetails:\n",
+    "            print(run_details)\n",
+    "    return data"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 4,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "def create_dataset(db=\"df.db\", parameters=None, normalize_data=False, show_rundetails=False):\n",
+    "    normalize_data=False\n",
+    "    show_rundetails=False\n",
+    "    # Output\n",
+    "    data = []\n",
+    "    run_details = {\"Fail types loaded\":0, \n",
+    "                    \"Samples removed\":{\n",
+    "                                        0:0, \n",
+    "                                        1:0,\n",
+    "                                        },\n",
+    "                    \"Dropped tin\":{\n",
+    "                                    0:[],\n",
+    "                                    1:[]},\n",
+    "                                    }\n",
+    "\n",
+    "        \n",
+    "    # Paramters\n",
+    "    roll = parameters[\"roll\"]\n",
+    "    sub_sample = parameters[\"Sub sample\"]\n",
+    "    drop_sample = parameters[\"drop_sample\"]+1 #Definierar 0 som ingen drop, men måste lägga till 1 pga att loopen f\n",
+    "\n",
+    "    for fail in range(2):\n",
+    "        run_details[\"Fail types loaded\"] +=1\n",
+    "        print(f\"Run {fail} started\")\n",
+    "        # Create df with 0 and 1\n",
+    "        df = import_labels(label=fail, db=db, n_random = parameters[\"nRandom samples\"][fail])\n",
+    "        cars = df[\"tin_an\"].unique()\n",
+    "        print(f\"{len(cars)} Cars in df\")\n",
+    "        for i_car in range(len(cars)): # Change to 2\n",
+    "\n",
+    "            # Get unique tin_number for fail / healthy\n",
+    "            df_tin = df[df[\"tin_an\"] == cars[i_car]]\n",
+    "            df_tin = df_tin.reset_index()\n",
+    "            if fail == 1:\n",
+    "                max_index  = df_tin[df_tin[\"Fail\"] == 1].index.values\n",
+    "                last_idx = max_index[-1]\n",
+    "                df_tensor = df_tin[:last_idx+1]\n",
+    "            else:\n",
+    "                last_idx = len(df_tin) +1 #-1\n",
+    "                df_tensor = df_tin[:last_idx+1]\n",
+    "\n",
+    "\n",
+    "            #for roll in range(1,5):\n",
+    "                #display(df_tensor[-roll-sub_sample:-roll])\n",
+    "\n",
+    "            ### Create rolling\n",
+    "            # 1 should be standard\n",
+    "            last_idx_temp = last_idx\n",
+    "            for r in range(1,roll+1):\n",
+    "\n",
+    "                if r == 1:\n",
+    "                    r_end = None\n",
+    "                else:\n",
+    "                    r_end = -r + 1\n",
+    "\n",
+    "                #df_tensor_short = df_tensor[last_idx_temp-(parameters[\"Sub sample\"]):last_idx_temp+1]\n",
+    "                #df_tensor_short = df_tensor[-r-sub_sample:-r]\n",
+    "                df_tensor_short = df_tensor[-r-sub_sample+1:r_end]\n",
+    "                last_idx_temp -= 1\n",
+    "\n",
+    "                #if len(df_tensor_short) < parameters[\"Sub sample\"]:\n",
+    "                    #   min_length = parameters[\"Sub sample\"]\n",
+    "                    #   print(f\"Skipping df. df_tensor length {len(df_tensor_short)}. (min lentht {min_length})\")\n",
+    "\n",
+    "                # Create database\n",
+    "                if (len(df_tensor_short) >= (sub_sample)) & (r >= (drop_sample)):\n",
+    "                #if (len(df_tensor_short) >= (sub_sample)) & (r > (drop_sample)):\n",
+    "                #if (len(df_tensor_short) >= (sub_sample)):\n",
+    "                    x = sample_to_tensor_x(df_tensor_short, sub_samples=sub_sample)\n",
+    "                    if normalize_data:\n",
+    "                        #x = normalize(x, p=2, dim = 1) # 1 or 0 \n",
+    "                        # Normalize by xi - min(x) / (max(x) - min(x))\n",
+    "                        min_i = x.min().item()\n",
+    "                        max_i = x.max().item()\n",
+    "                        x = (x-min_i)/(max_i - min_i)\n",
+    "                    y = fail\n",
+    "                    data.append((x,y))\n",
+    "                if (len(df_tensor_short) < (sub_sample)):\n",
+    "                    run_details[\"Samples removed\"][fail] +=1\n",
+    "                    run_details[\"Dropped tin\"][fail].append(df_tensor[\"tin_an\"].unique()[0])\n",
+    "                    #continue\n",
+    "        if show_rundetails:\n",
+    "            print(run_details)\n",
+    "    return data"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 5,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#db = \"df_10.db\"\n",
+    "db = \"df.db\"\n",
+    "\n",
+    "# Annotate data (ONLY RUN IF NEW ANNOTATION IS REQUIRED)\n",
+    "#ap.annotate_db(fail_type=\"SOC\", db=db)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": []
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Basic data analysis"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 5,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>tin_an</th>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>Fail</th>\n",
+       "      <th></th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <th>0</th>\n",
+       "      <td>18575</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>1</th>\n",
+       "      <td>369</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "      tin_an\n",
+       "Fail        \n",
+       "0      18575\n",
+       "1        369"
+      ]
+     },
+     "execution_count": 5,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "query = f\"SELECT DISTINCT(main_table.tin_an), cell_fail.Fail FROM main_table \\\n",
+    "        INNER JOIN cell_fail \\\n",
+    "        ON main_table.rid = cell_fail.rid\"\n",
+    "\n",
+    "df_count = ap.load_sql(query , db=db)\n",
+    "df_count.groupby(\"Fail\").count()"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 6,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "query = f\"SELECT  * FROM main_table \\\n",
+    "        INNER JOIN cell_fail \\\n",
+    "        ON main_table.rid = cell_fail.rid WHERE tin_an = '66c630d829678a282a6f3b4254500792b6d719a13c3bedde2e84a0b0877fae9c'\"\n",
+    "\n",
+    "df_count = ap.load_sql(query , db=db)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 7,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/html": [
+       "<div>\n",
+       "<style scoped>\n",
+       "    .dataframe tbody tr th:only-of-type {\n",
+       "        vertical-align: middle;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe tbody tr th {\n",
+       "        vertical-align: top;\n",
+       "    }\n",
+       "\n",
+       "    .dataframe thead th {\n",
+       "        text-align: right;\n",
+       "    }\n",
+       "</style>\n",
+       "<table border=\"1\" class=\"dataframe\">\n",
+       "  <thead>\n",
+       "    <tr style=\"text-align: right;\">\n",
+       "      <th></th>\n",
+       "      <th>rid</th>\n",
+       "      <th>timestamp</th>\n",
+       "      <th>F120/SW</th>\n",
+       "      <th>tin_an</th>\n",
+       "      <th>Sorted_Voltage</th>\n",
+       "      <th>Sorted_SOC</th>\n",
+       "      <th>Volt_Dev</th>\n",
+       "      <th>Soc_Dev</th>\n",
+       "      <th>index</th>\n",
+       "      <th>rid</th>\n",
+       "      <th>Volt_Dev</th>\n",
+       "      <th>Soc_Dev</th>\n",
+       "      <th>Fail</th>\n",
+       "    </tr>\n",
+       "  </thead>\n",
+       "  <tbody>\n",
+       "    <tr>\n",
+       "      <th>0</th>\n",
+       "      <td>b07e7c31-c68f-2f9e-fcf6-dba567084c91</td>\n",
+       "      <td>2021-04-17 12:16:14</td>\n",
+       "      <td>{F120/diagnostic_part_number=32299361 AB}</td>\n",
+       "      <td>66c630d829678a282a6f3b4254500792b6d719a13c3bed...</td>\n",
+       "      <td>[3.7777, 3.7767, 3.7797, 3.7795, 3.7783, 3.778...</td>\n",
+       "      <td>[57.02, 56.9, 57.23, 57.2, 57.07, 57.06, 56.95...</td>\n",
+       "      <td>0.001138</td>\n",
+       "      <td>0.660000</td>\n",
+       "      <td>424721</td>\n",
+       "      <td>b07e7c31-c68f-2f9e-fcf6-dba567084c91</td>\n",
+       "      <td>0.001138</td>\n",
+       "      <td>0.660000</td>\n",
+       "      <td>0</td>\n",
+       "    </tr>\n",
+       "    <tr>\n",
+       "      <th>1</th>\n",
+       "      <td>33757a62-63f7-f0d5-471e-cdd6829b290d</td>\n",
+       "      <td>2021-04-16 09:40:05</td>\n",
+       "      <td>{F120/diagnostic_part_number=32299361 AB}</td>\n",
+       "      <td>66c630d829678a282a6f3b4254500792b6d719a13c3bed...</td>\n",
+       "      <td>[3.8448, 3.8427, 3.8462, 3.8464, 3.8455, 3.844...</td>\n",
+       "      <td>[64.15, 64.01, 64.39, 64.38, 64.23, 64.19, 64....</td>\n",
+       "      <td>0.001144</td>\n",
+       "      <td>0.729996</td>\n",
+       "      <td>1355820</td>\n",
+       "      <td>33757a62-63f7-f0d5-471e-cdd6829b290d</td>\n",
+       "      <td>0.001144</td>\n",
+       "      <td>0.729996</td>\n",
+       "      <td>0</td>\n",
+       "    </tr>\n",
+       "  </tbody>\n",
+       "</table>\n",
+       "</div>"
+      ],
+      "text/plain": [
+       "                                    rid            timestamp  \\\n",
+       "0  b07e7c31-c68f-2f9e-fcf6-dba567084c91  2021-04-17 12:16:14   \n",
+       "1  33757a62-63f7-f0d5-471e-cdd6829b290d  2021-04-16 09:40:05   \n",
+       "\n",
+       "                                     F120/SW  \\\n",
+       "0  {F120/diagnostic_part_number=32299361 AB}   \n",
+       "1  {F120/diagnostic_part_number=32299361 AB}   \n",
+       "\n",
+       "                                              tin_an  \\\n",
+       "0  66c630d829678a282a6f3b4254500792b6d719a13c3bed...   \n",
+       "1  66c630d829678a282a6f3b4254500792b6d719a13c3bed...   \n",
+       "\n",
+       "                                      Sorted_Voltage  \\\n",
+       "0  [3.7777, 3.7767, 3.7797, 3.7795, 3.7783, 3.778...   \n",
+       "1  [3.8448, 3.8427, 3.8462, 3.8464, 3.8455, 3.844...   \n",
+       "\n",
+       "                                          Sorted_SOC  Volt_Dev   Soc_Dev  \\\n",
+       "0  [57.02, 56.9, 57.23, 57.2, 57.07, 57.06, 56.95...  0.001138  0.660000   \n",
+       "1  [64.15, 64.01, 64.39, 64.38, 64.23, 64.19, 64....  0.001144  0.729996   \n",
+       "\n",
+       "     index                                   rid  Volt_Dev   Soc_Dev  Fail  \n",
+       "0   424721  b07e7c31-c68f-2f9e-fcf6-dba567084c91  0.001138  0.660000     0  \n",
+       "1  1355820  33757a62-63f7-f0d5-471e-cdd6829b290d  0.001144  0.729996     0  "
+      ]
+     },
+     "execution_count": 7,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "df_count "
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Select parameters for data creation"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "\"\"\"Paramater values:\n",
+    "\n",
+    "Sub_sample: How mmany timesamples backwards should be included (0 only give 1 sample, i.e [1,108])\n",
+    "drop_sample: How many samples should be dropped (0 for no drop). DROP SAMPLE MUST BE LARGER THAN ROLL\n",
+    "roll: How many timesteps back should we roll (1 for no rolling) \n",
+    "\"\"\"\n",
+    "parameters = {\"nRandom samples\":{\n",
+    "                                0 : 360,\n",
+    "                                1 : 360,\n",
+    "                                },\n",
+    "            \"Sub sample\":10,\n",
+    "            \"drop_sample\":0, # Default 0\n",
+    "            \"roll\":3         # Default 1 (Must be larger or equal to subsample)\n",
+    "            }"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 6,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Run 0 started\n",
+      "360 Unique cars with label 0 has been imported with {len(df)} subsamples\n",
+      "360 Cars in df\n",
+      "{'Fail types loaded': 1, 'Samples removed': {0: 46, 1: 0}, 'Dropped tin': {0: ['66c630d829678a282a6f3b4254500792b6d719a13c3bedde2e84a0b0877fae9c', '66c630d829678a282a6f3b4254500792b6d719a13c3bedde2e84a0b0877fae9c', '66c630d829678a282a6f3b4254500792b6d719a13c3bedde2e84a0b0877fae9c', '5c2898c9f9272503294c71558f452058c9bce8f0a0a35f656fcf7f712968c966', '5c2898c9f9272503294c71558f452058c9bce8f0a0a35f656fcf7f712968c966', '5c2898c9f9272503294c71558f452058c9bce8f0a0a35f656fcf7f712968c966', '740d6e1a9a0de33f68f397ec1d48956743f4bd66db15277814cee7d93c40390d', '740d6e1a9a0de33f68f397ec1d48956743f4bd66db15277814cee7d93c40390d', '740d6e1a9a0de33f68f397ec1d48956743f4bd66db15277814cee7d93c40390d', '3b963153db03f21e745837c6df952165a478eb6490ca500f515b33d419ba5db6', '3b963153db03f21e745837c6df952165a478eb6490ca500f515b33d419ba5db6', '3b963153db03f21e745837c6df952165a478eb6490ca500f515b33d419ba5db6', 'de3b80aba92cda79df83273b0ac1ad682c79839f34d4fb128e10a6589f4d8bf4', 'de3b80aba92cda79df83273b0ac1ad682c79839f34d4fb128e10a6589f4d8bf4', 'de3b80aba92cda79df83273b0ac1ad682c79839f34d4fb128e10a6589f4d8bf4', '23e4f23f374f360759c82f63e75b98ab146ded46891a9111b225f7650ae3ba76', '23e4f23f374f360759c82f63e75b98ab146ded46891a9111b225f7650ae3ba76', '23e4f23f374f360759c82f63e75b98ab146ded46891a9111b225f7650ae3ba76', 'c87134a3118316e77b494709da9435319e5b177d01995cf4d0a55561d19fefcc', 'c87134a3118316e77b494709da9435319e5b177d01995cf4d0a55561d19fefcc', 'c87134a3118316e77b494709da9435319e5b177d01995cf4d0a55561d19fefcc', '7edb37ec7a48dc879e18c35b575a3367b6950a816c54e8b6bd4eeafe2055084e', '7edb37ec7a48dc879e18c35b575a3367b6950a816c54e8b6bd4eeafe2055084e', '7edb37ec7a48dc879e18c35b575a3367b6950a816c54e8b6bd4eeafe2055084e', 'a7f7000b2aeae5a4decaa7a74155286dc62397cb3dfdffb94c2274ba60e64434', 'a7f7000b2aeae5a4decaa7a74155286dc62397cb3dfdffb94c2274ba60e64434', 'a7f7000b2aeae5a4decaa7a74155286dc62397cb3dfdffb94c2274ba60e64434', '1677deaba5bd42ab0bbff9f1ebf72a610d4f0a07cbc8d9948ee4aa7fe90910e3', '5a1c095c42b9ae643e8ea391eb748fef6b9bb6f96fc5ab150210e3a1c8d90282', '5a1c095c42b9ae643e8ea391eb748fef6b9bb6f96fc5ab150210e3a1c8d90282', '5a1c095c42b9ae643e8ea391eb748fef6b9bb6f96fc5ab150210e3a1c8d90282', 'cbc8ef6636933b6f1a488e6608ad2d848a95129e2289ab1de0945e49c93511ea', 'cbc8ef6636933b6f1a488e6608ad2d848a95129e2289ab1de0945e49c93511ea', 'cbc8ef6636933b6f1a488e6608ad2d848a95129e2289ab1de0945e49c93511ea', '67917a21b9058f55e8478806fbd013bcef0840278927d77171b573e29e6e090c', '67917a21b9058f55e8478806fbd013bcef0840278927d77171b573e29e6e090c', '67917a21b9058f55e8478806fbd013bcef0840278927d77171b573e29e6e090c', '6ba1ec2d59dd3e3d69a6e7be8ec7ce9b5a7aac3b11f844722be3a2ea489c8764', '6ba1ec2d59dd3e3d69a6e7be8ec7ce9b5a7aac3b11f844722be3a2ea489c8764', '6ba1ec2d59dd3e3d69a6e7be8ec7ce9b5a7aac3b11f844722be3a2ea489c8764', 'efda557290032c393790b383db641a22edb0d5c0b0b8a686f05bd3deb345d81c', 'efda557290032c393790b383db641a22edb0d5c0b0b8a686f05bd3deb345d81c', 'efda557290032c393790b383db641a22edb0d5c0b0b8a686f05bd3deb345d81c', '844ae114df74f59863e6cede22a18b1292b9bb150167643cee1cd1086eeacbe2', '844ae114df74f59863e6cede22a18b1292b9bb150167643cee1cd1086eeacbe2', '844ae114df74f59863e6cede22a18b1292b9bb150167643cee1cd1086eeacbe2'], 1: []}}\n",
+      "Run 1 started\n",
+      "360 Unique cars with label 1 has been imported with {len(df)} subsamples\n",
+      "360 Cars in df\n",
+      "{'Fail types loaded': 2, 'Samples removed': {0: 46, 1: 157}, 'Dropped tin': {0: ['66c630d829678a282a6f3b4254500792b6d719a13c3bedde2e84a0b0877fae9c', '66c630d829678a282a6f3b4254500792b6d719a13c3bedde2e84a0b0877fae9c', '66c630d829678a282a6f3b4254500792b6d719a13c3bedde2e84a0b0877fae9c', '5c2898c9f9272503294c71558f452058c9bce8f0a0a35f656fcf7f712968c966', '5c2898c9f9272503294c71558f452058c9bce8f0a0a35f656fcf7f712968c966', '5c2898c9f9272503294c71558f452058c9bce8f0a0a35f656fcf7f712968c966', '740d6e1a9a0de33f68f397ec1d48956743f4bd66db15277814cee7d93c40390d', '740d6e1a9a0de33f68f397ec1d48956743f4bd66db15277814cee7d93c40390d', '740d6e1a9a0de33f68f397ec1d48956743f4bd66db15277814cee7d93c40390d', '3b963153db03f21e745837c6df952165a478eb6490ca500f515b33d419ba5db6', '3b963153db03f21e745837c6df952165a478eb6490ca500f515b33d419ba5db6', '3b963153db03f21e745837c6df952165a478eb6490ca500f515b33d419ba5db6', 'de3b80aba92cda79df83273b0ac1ad682c79839f34d4fb128e10a6589f4d8bf4', 'de3b80aba92cda79df83273b0ac1ad682c79839f34d4fb128e10a6589f4d8bf4', 'de3b80aba92cda79df83273b0ac1ad682c79839f34d4fb128e10a6589f4d8bf4', '23e4f23f374f360759c82f63e75b98ab146ded46891a9111b225f7650ae3ba76', '23e4f23f374f360759c82f63e75b98ab146ded46891a9111b225f7650ae3ba76', '23e4f23f374f360759c82f63e75b98ab146ded46891a9111b225f7650ae3ba76', 'c87134a3118316e77b494709da9435319e5b177d01995cf4d0a55561d19fefcc', 'c87134a3118316e77b494709da9435319e5b177d01995cf4d0a55561d19fefcc', 'c87134a3118316e77b494709da9435319e5b177d01995cf4d0a55561d19fefcc', '7edb37ec7a48dc879e18c35b575a3367b6950a816c54e8b6bd4eeafe2055084e', '7edb37ec7a48dc879e18c35b575a3367b6950a816c54e8b6bd4eeafe2055084e', '7edb37ec7a48dc879e18c35b575a3367b6950a816c54e8b6bd4eeafe2055084e', 'a7f7000b2aeae5a4decaa7a74155286dc62397cb3dfdffb94c2274ba60e64434', 'a7f7000b2aeae5a4decaa7a74155286dc62397cb3dfdffb94c2274ba60e64434', 'a7f7000b2aeae5a4decaa7a74155286dc62397cb3dfdffb94c2274ba60e64434', '1677deaba5bd42ab0bbff9f1ebf72a610d4f0a07cbc8d9948ee4aa7fe90910e3', '5a1c095c42b9ae643e8ea391eb748fef6b9bb6f96fc5ab150210e3a1c8d90282', '5a1c095c42b9ae643e8ea391eb748fef6b9bb6f96fc5ab150210e3a1c8d90282', '5a1c095c42b9ae643e8ea391eb748fef6b9bb6f96fc5ab150210e3a1c8d90282', 'cbc8ef6636933b6f1a488e6608ad2d848a95129e2289ab1de0945e49c93511ea', 'cbc8ef6636933b6f1a488e6608ad2d848a95129e2289ab1de0945e49c93511ea', 'cbc8ef6636933b6f1a488e6608ad2d848a95129e2289ab1de0945e49c93511ea', '67917a21b9058f55e8478806fbd013bcef0840278927d77171b573e29e6e090c', '67917a21b9058f55e8478806fbd013bcef0840278927d77171b573e29e6e090c', '67917a21b9058f55e8478806fbd013bcef0840278927d77171b573e29e6e090c', '6ba1ec2d59dd3e3d69a6e7be8ec7ce9b5a7aac3b11f844722be3a2ea489c8764', '6ba1ec2d59dd3e3d69a6e7be8ec7ce9b5a7aac3b11f844722be3a2ea489c8764', '6ba1ec2d59dd3e3d69a6e7be8ec7ce9b5a7aac3b11f844722be3a2ea489c8764', 'efda557290032c393790b383db641a22edb0d5c0b0b8a686f05bd3deb345d81c', 'efda557290032c393790b383db641a22edb0d5c0b0b8a686f05bd3deb345d81c', 'efda557290032c393790b383db641a22edb0d5c0b0b8a686f05bd3deb345d81c', '844ae114df74f59863e6cede22a18b1292b9bb150167643cee1cd1086eeacbe2', '844ae114df74f59863e6cede22a18b1292b9bb150167643cee1cd1086eeacbe2', '844ae114df74f59863e6cede22a18b1292b9bb150167643cee1cd1086eeacbe2'], 1: ['b2da162ed9d9cdf6e3a63eab6a2d9e5c7d8da5a58920bc9b9faba1d806fa1cdc', 'b2da162ed9d9cdf6e3a63eab6a2d9e5c7d8da5a58920bc9b9faba1d806fa1cdc', 'b2da162ed9d9cdf6e3a63eab6a2d9e5c7d8da5a58920bc9b9faba1d806fa1cdc', 'b1cb42ebd2e19e289f79c3481c870d7411a0912c6e0739aab0793fda4c9a5cd6', 'b1cb42ebd2e19e289f79c3481c870d7411a0912c6e0739aab0793fda4c9a5cd6', 'b1cb42ebd2e19e289f79c3481c870d7411a0912c6e0739aab0793fda4c9a5cd6', 'cfffa7e54b8978fb0feeb146b02abcd0edb801ba8d9463318eabb5718cd24649', '1f1a21f99e3fc604434bebef3c23c2736182404399723a7d13efc560c0221def', '1f1a21f99e3fc604434bebef3c23c2736182404399723a7d13efc560c0221def', '1f1a21f99e3fc604434bebef3c23c2736182404399723a7d13efc560c0221def', 'f56ad1f4673d44417896f2c69926fe45f560c655febdf9b399e5abb0498cbcc4', 'f56ad1f4673d44417896f2c69926fe45f560c655febdf9b399e5abb0498cbcc4', 'f56ad1f4673d44417896f2c69926fe45f560c655febdf9b399e5abb0498cbcc4', '36a48fe41b39d708172a7e612a2aa76ef3ef389dfbea33ac03708c75a936c330', '36a48fe41b39d708172a7e612a2aa76ef3ef389dfbea33ac03708c75a936c330', '36a48fe41b39d708172a7e612a2aa76ef3ef389dfbea33ac03708c75a936c330', '632238a1d8b47722dae27596606f5a03261f7ea60adb014a08999358ab85c033', '632238a1d8b47722dae27596606f5a03261f7ea60adb014a08999358ab85c033', '632238a1d8b47722dae27596606f5a03261f7ea60adb014a08999358ab85c033', '4061b6fe16198a4c44e84bb7a33ef19cbd6b9e326b7129c47caa8f15558c15d3', '4061b6fe16198a4c44e84bb7a33ef19cbd6b9e326b7129c47caa8f15558c15d3', '4061b6fe16198a4c44e84bb7a33ef19cbd6b9e326b7129c47caa8f15558c15d3', '9ebdb1f5b15de6cb445ae01a384bfccc2704b104cdd1e3e03413ca486a29eedc', '9ebdb1f5b15de6cb445ae01a384bfccc2704b104cdd1e3e03413ca486a29eedc', '9ebdb1f5b15de6cb445ae01a384bfccc2704b104cdd1e3e03413ca486a29eedc', '6a62c3d7e59fa3b6187eaca7190f20b5605728c579d3be3f6ada7a54fbe81cf6', '6a62c3d7e59fa3b6187eaca7190f20b5605728c579d3be3f6ada7a54fbe81cf6', '6a62c3d7e59fa3b6187eaca7190f20b5605728c579d3be3f6ada7a54fbe81cf6', '9a2646ce371b027df65b87164f40d5b8ccf4f95d7d728e844b0d942fc5b9fdd5', '9a2646ce371b027df65b87164f40d5b8ccf4f95d7d728e844b0d942fc5b9fdd5', 'fe4109157aab728ddc702fdfb1f78af29fd443f08271aa2c44c2a1c2b3d4c552', 'fe4109157aab728ddc702fdfb1f78af29fd443f08271aa2c44c2a1c2b3d4c552', 'fe4109157aab728ddc702fdfb1f78af29fd443f08271aa2c44c2a1c2b3d4c552', '552484a0a16f50747a561f675a6e8e8f093f7dc312f639b9b865d4fde9f7468a', '552484a0a16f50747a561f675a6e8e8f093f7dc312f639b9b865d4fde9f7468a', '7d33e9d614ef1804e4fedbdb325d3a3ccc04725067910582c34bd3b7d9b7aaf0', '7d33e9d614ef1804e4fedbdb325d3a3ccc04725067910582c34bd3b7d9b7aaf0', '7d33e9d614ef1804e4fedbdb325d3a3ccc04725067910582c34bd3b7d9b7aaf0', 'd4096269716f8bed7b4e18ead9b1c6e016e0e4bfad0a08b0097f497093aa20cd', '6061cd087c349f1d6adf072747a4b39c9720a77f86f914c4255d17e1aff551f0', '6061cd087c349f1d6adf072747a4b39c9720a77f86f914c4255d17e1aff551f0', '6061cd087c349f1d6adf072747a4b39c9720a77f86f914c4255d17e1aff551f0', 'd7484e71c57f744799ad9533b1baa889ec79099f6cf009c294119a94c26db6a8', 'd7484e71c57f744799ad9533b1baa889ec79099f6cf009c294119a94c26db6a8', 'd7484e71c57f744799ad9533b1baa889ec79099f6cf009c294119a94c26db6a8', '9408b2d98c96005834412dda693a722f0f9c29ad303807b79b9868d8d1bbef4f', '50548c0f7d9490cf1931bc830790f9669a49de2e1f6a0d6ccd811c2999bf9354', '50548c0f7d9490cf1931bc830790f9669a49de2e1f6a0d6ccd811c2999bf9354', '50548c0f7d9490cf1931bc830790f9669a49de2e1f6a0d6ccd811c2999bf9354', 'cad4410293b9ea35d8c93db5504f119f7034bbd01cc272c6dafe5fecd63b22b5', 'cad4410293b9ea35d8c93db5504f119f7034bbd01cc272c6dafe5fecd63b22b5', 'cad4410293b9ea35d8c93db5504f119f7034bbd01cc272c6dafe5fecd63b22b5', 'f4133abf7ac11cf468298826020d37f19346648509a71d80a3a7a8d2e9999cd7', '465e4b86bfb0e2443c95fdcbcbfcb44bf10b7be5ac45dc5a76afa1f9a4f18dd6', '465e4b86bfb0e2443c95fdcbcbfcb44bf10b7be5ac45dc5a76afa1f9a4f18dd6', '465e4b86bfb0e2443c95fdcbcbfcb44bf10b7be5ac45dc5a76afa1f9a4f18dd6', '9992e62fdb966cfcad84ef85579a26d65bd980c08bd3a2f923b0cc062ad3899d', '9992e62fdb966cfcad84ef85579a26d65bd980c08bd3a2f923b0cc062ad3899d', '9992e62fdb966cfcad84ef85579a26d65bd980c08bd3a2f923b0cc062ad3899d', '8b9369630778f20204871760a95d7a10c77d739b944a81a9377dcea9301fecfc', '8b9369630778f20204871760a95d7a10c77d739b944a81a9377dcea9301fecfc', '8b9369630778f20204871760a95d7a10c77d739b944a81a9377dcea9301fecfc', '551e69aceffeace260da01906a8938ea5fee1edc88c1d1a535d54e3d7aa8291a', '551e69aceffeace260da01906a8938ea5fee1edc88c1d1a535d54e3d7aa8291a', '551e69aceffeace260da01906a8938ea5fee1edc88c1d1a535d54e3d7aa8291a', '9ba35428d4dfdc22b1c3f2f458f2338c556cd5cd7dfd3949a65f522b31238c03', '9ba35428d4dfdc22b1c3f2f458f2338c556cd5cd7dfd3949a65f522b31238c03', '9ba35428d4dfdc22b1c3f2f458f2338c556cd5cd7dfd3949a65f522b31238c03', 'c02c61e66ec8dbac55db828665847409176d958932ee262e99ed79d4df13f747', 'c02c61e66ec8dbac55db828665847409176d958932ee262e99ed79d4df13f747', 'c02c61e66ec8dbac55db828665847409176d958932ee262e99ed79d4df13f747', '7b8faa5438d7b36014373f096699ded545b194251a18007f3e1057b4597313e6', '7b8faa5438d7b36014373f096699ded545b194251a18007f3e1057b4597313e6', '7b8faa5438d7b36014373f096699ded545b194251a18007f3e1057b4597313e6', '53b18e18444fa8bc9c94ed461e05de2a49cf502b02dd848b0a6452b0a10bdc86', '53b18e18444fa8bc9c94ed461e05de2a49cf502b02dd848b0a6452b0a10bdc86', '53b18e18444fa8bc9c94ed461e05de2a49cf502b02dd848b0a6452b0a10bdc86', 'c726ea44cb32a6be4ea31b99c3e44dc54929914c9b8162e11c60bebb98359689', 'c726ea44cb32a6be4ea31b99c3e44dc54929914c9b8162e11c60bebb98359689', 'c726ea44cb32a6be4ea31b99c3e44dc54929914c9b8162e11c60bebb98359689', '7ceb1eb378828642fc2f471ff683c5e62723f805c17250e36e4c589a5f63d3c3', '7ceb1eb378828642fc2f471ff683c5e62723f805c17250e36e4c589a5f63d3c3', '7ceb1eb378828642fc2f471ff683c5e62723f805c17250e36e4c589a5f63d3c3', '3199cf88bbafd500462ca41324bd4ba2c2209c66ec78f8ef4e02b99f6a79e047', '3199cf88bbafd500462ca41324bd4ba2c2209c66ec78f8ef4e02b99f6a79e047', '3199cf88bbafd500462ca41324bd4ba2c2209c66ec78f8ef4e02b99f6a79e047', '70c822dd5c3bb64d63d87e066a87ae16eae9964fa878da7b07407eef2a8459ae', '70c822dd5c3bb64d63d87e066a87ae16eae9964fa878da7b07407eef2a8459ae', 'e0d03367e9c8e3a9b6167a5006d031f4657abad6e7b981c5a5588999ebcb8222', 'e0d03367e9c8e3a9b6167a5006d031f4657abad6e7b981c5a5588999ebcb8222', 'e0d03367e9c8e3a9b6167a5006d031f4657abad6e7b981c5a5588999ebcb8222', '13a3a3bb4096adc807f25e90fe2f69b05451a31f23a4c0bc580aefc0d774ffa4', '13a3a3bb4096adc807f25e90fe2f69b05451a31f23a4c0bc580aefc0d774ffa4', '13a3a3bb4096adc807f25e90fe2f69b05451a31f23a4c0bc580aefc0d774ffa4', 'c25910bd2992b5907a820893fcd9daac379d4f8ea7fcb40f14f7f16fc9937a0f', 'c25910bd2992b5907a820893fcd9daac379d4f8ea7fcb40f14f7f16fc9937a0f', 'c25910bd2992b5907a820893fcd9daac379d4f8ea7fcb40f14f7f16fc9937a0f', '098a38b904ad9fe5af0c9568c9df57886292928bfc5802fe1babe76c42bd2ead', '098a38b904ad9fe5af0c9568c9df57886292928bfc5802fe1babe76c42bd2ead', '098a38b904ad9fe5af0c9568c9df57886292928bfc5802fe1babe76c42bd2ead', 'e61a8bdab0d71267ce516ab3a92c0a0c564b8f2ecb2369280be9ddf168942d82', '3e713e8ffefb1780b4bc54217cb1e42d106def47f0b0fadda969b6b1c2c1cf9f', '3e713e8ffefb1780b4bc54217cb1e42d106def47f0b0fadda969b6b1c2c1cf9f', '3e713e8ffefb1780b4bc54217cb1e42d106def47f0b0fadda969b6b1c2c1cf9f', 'dbbec4a5f57f0648b91cf61e3cfde1e5e59254a8ad80cce76b8a51eef7337a5d', 'dbbec4a5f57f0648b91cf61e3cfde1e5e59254a8ad80cce76b8a51eef7337a5d', 'dbbec4a5f57f0648b91cf61e3cfde1e5e59254a8ad80cce76b8a51eef7337a5d', '0cdd1d080e42cf7b525fdb7bea9c8e3894e41eebb60d49d9b4047a81eb94855c', '0cdd1d080e42cf7b525fdb7bea9c8e3894e41eebb60d49d9b4047a81eb94855c', '0cdd1d080e42cf7b525fdb7bea9c8e3894e41eebb60d49d9b4047a81eb94855c', 'a3c648a88f72b0312b763fa2f0df46f43a571ebf717defe9694d0630b14b8414', 'a3c648a88f72b0312b763fa2f0df46f43a571ebf717defe9694d0630b14b8414', 'b7e7d8473376e7321e43129740191728b2b8c81676f9daab4e4402708e60f8e9', 'b5fb2f06b7f3a09c74371df8da376b041f59045783a54f57251ce2c31993f6d9', 'b5fb2f06b7f3a09c74371df8da376b041f59045783a54f57251ce2c31993f6d9', 'b5fb2f06b7f3a09c74371df8da376b041f59045783a54f57251ce2c31993f6d9', 'ca36a79c288ee619691addda3ff1cb4d53dbc3f2c1a82508903cdcf9805d6bd8', 'ca36a79c288ee619691addda3ff1cb4d53dbc3f2c1a82508903cdcf9805d6bd8', 'ca36a79c288ee619691addda3ff1cb4d53dbc3f2c1a82508903cdcf9805d6bd8', 'b917782586676e8d4a19d8b26e82ecac1eab78e32c8f2ac2934ce2f1a3fb6eb2', 'b917782586676e8d4a19d8b26e82ecac1eab78e32c8f2ac2934ce2f1a3fb6eb2', 'b917782586676e8d4a19d8b26e82ecac1eab78e32c8f2ac2934ce2f1a3fb6eb2', '7048ea3ed205559992e9eaa9147020ba50ab9e7e349268f22555f90a6757d6bb', '7048ea3ed205559992e9eaa9147020ba50ab9e7e349268f22555f90a6757d6bb', '7048ea3ed205559992e9eaa9147020ba50ab9e7e349268f22555f90a6757d6bb', 'a7945c1a78c84484b85983a56cdfd32b05319a18466b15e76946e1c8c038d7be', 'a7945c1a78c84484b85983a56cdfd32b05319a18466b15e76946e1c8c038d7be', 'a7945c1a78c84484b85983a56cdfd32b05319a18466b15e76946e1c8c038d7be', '9fe1599ad27eee0fefaeb07324c2bb7d848aa4082e16365fa47977283b32356f', '9fe1599ad27eee0fefaeb07324c2bb7d848aa4082e16365fa47977283b32356f', '9fe1599ad27eee0fefaeb07324c2bb7d848aa4082e16365fa47977283b32356f', 'ddf6232f1e89d1203f6bd825938a51369a84bb938f4fe1234d658da131c7abe9', 'ddf6232f1e89d1203f6bd825938a51369a84bb938f4fe1234d658da131c7abe9', 'ddf6232f1e89d1203f6bd825938a51369a84bb938f4fe1234d658da131c7abe9', 'a2ab8f77a76a53afaecfb2c96e0cbe6cbf218726fb4f57127c2a0c51889cd4fa', 'a2ab8f77a76a53afaecfb2c96e0cbe6cbf218726fb4f57127c2a0c51889cd4fa', '82b74c276ea9b769eb388d16207bfb424ecb5a7d5442ca761147a8818975c975', '82b74c276ea9b769eb388d16207bfb424ecb5a7d5442ca761147a8818975c975', '82b74c276ea9b769eb388d16207bfb424ecb5a7d5442ca761147a8818975c975', '8dd8a048388c0a22337c17f0091f8f2a81e1309dbf32db8656fe1e050e129864', '8dd8a048388c0a22337c17f0091f8f2a81e1309dbf32db8656fe1e050e129864', '8dd8a048388c0a22337c17f0091f8f2a81e1309dbf32db8656fe1e050e129864', '4d4d94dc073cadacefdc6250dd908c72bc1fe608bbd218fedf33cb02666f97ea', '4d4d94dc073cadacefdc6250dd908c72bc1fe608bbd218fedf33cb02666f97ea', '4d4d94dc073cadacefdc6250dd908c72bc1fe608bbd218fedf33cb02666f97ea', 'b0bd5aba63ef0987cbbf5df2fc8f1eb799eee71311469110750d672039b83172', 'b0bd5aba63ef0987cbbf5df2fc8f1eb799eee71311469110750d672039b83172', 'b0bd5aba63ef0987cbbf5df2fc8f1eb799eee71311469110750d672039b83172', '85eb20d90131e538a2288b6febf6df6ef64456a8399eb106c5d70818f2d4044e', '85eb20d90131e538a2288b6febf6df6ef64456a8399eb106c5d70818f2d4044e', '85eb20d90131e538a2288b6febf6df6ef64456a8399eb106c5d70818f2d4044e', 'e440013ce08950d076737627e6c6dae2f53519e8e1ee4f64c314253dbaad3037', 'e440013ce08950d076737627e6c6dae2f53519e8e1ee4f64c314253dbaad3037', 'e440013ce08950d076737627e6c6dae2f53519e8e1ee4f64c314253dbaad3037', '60b6eebe67fde3a624d212736346e4f0ff80f6d3d160941910add6b210bc74b5', '60b6eebe67fde3a624d212736346e4f0ff80f6d3d160941910add6b210bc74b5', '60b6eebe67fde3a624d212736346e4f0ff80f6d3d160941910add6b210bc74b5']}}\n"
+     ]
+    }
+   ],
+   "source": [
+    "val_data =ap.create_dataset(db=\"df.db\", parameters=parameters, normalize_data=True, show_rundetails=True)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Create dataset"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 148,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "train_size = int(len(data)*0.8)\n",
+    "test_size = len(data) - train_size\n",
+    "train_set, test_set = torch.utils.data.random_split(data,[train_size, test_size])\n",
+    "batch_size = 10\n",
+    "train_loader = DataLoader(dataset=train_set, batch_size=batch_size, shuffle=True,drop_last=True)\n",
+    "test_loader = DataLoader(dataset=test_set, batch_size=batch_size, shuffle=True,drop_last=True, pin_memory=True)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Testa förhållandet 0 / 1 i train och test"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 149,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "0.5228884590586719\n",
+      "0.4771115409413282\n"
+     ]
+    }
+   ],
+   "source": [
+    "val_0 = 0\n",
+    "val_1 = 0\n",
+    "for i in range(len(train_set)):\n",
+    "    if train_set[i][1] == 0:\n",
+    "        val_0 += 1\n",
+    "    if train_set[i][1] == 1:\n",
+    "        val_1 += 1\n",
+    "print((val_0)/(val_0+val_1))\n",
+    "print((val_1)/(val_0+val_1))\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 150,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "0.5438144329896907\n",
+      "0.45618556701030927\n"
+     ]
+    }
+   ],
+   "source": [
+    "val_0 = 0\n",
+    "val_1 = 0\n",
+    "for i in range(len(test_set)):\n",
+    "    if test_set[i][1] == 0:\n",
+    "        val_0 += 1\n",
+    "    if test_set[i][1] == 1:\n",
+    "        val_1 += 1\n",
+    "print((val_0)/(val_0+val_1))\n",
+    "print((val_1)/(val_0+val_1))"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 151,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "torch.Size([10, 10, 108])"
+      ]
+     },
+     "execution_count": 151,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "for (X_train,y_train) in train_loader:\n",
+    "    break\n",
+    "X_train.shape\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 152,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "1939"
+      ]
+     },
+     "execution_count": 152,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "len(data)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Create network"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 153,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "10"
+      ]
+     },
+     "execution_count": 153,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "subsample  = parameters[\"Sub sample\"]\n",
+    "subsample"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": []
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 154,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "class ANNMultilayerperceptron(nn.Module):\n",
+    "\n",
+    "    def __init__(self, input_size=(subsample*108),output_size=2, layers=[220,84]):  # 120, 84\n",
+    "        super().__init__()\n",
+    "\n",
+    "        self.fc1 = nn.Linear(input_size, layers[0])\n",
+    "        self.fc2 = nn.Linear(layers[0], layers[1])\n",
+    "        self.fc2b = nn.Linear(layers[1], 500)\n",
+    "        self.fc2c = nn.Linear(500, layers[1])\n",
+    "        self.fc2d = nn.Linear(layers[1], layers[1])\n",
+    "        self.fc3 = nn.Linear(layers[1], output_size)\n",
+    "\n",
+    "    def forward(self,X):\n",
+    "        X = F.relu(self.fc1(X))\n",
+    "        X = F.relu(self.fc2(X))\n",
+    "        X = F.relu(self.fc2b(X))\n",
+    "        X = F.relu(self.fc2c(X))\n",
+    "        X = F.relu(self.fc2d(X))\n",
+    "        X = self.fc3(X)\n",
+    "\n",
+    "        return F.log_softmax(X,dim=1) # PGA multiclass classification\n",
+    "        #return X"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 155,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "ANNMultilayerperceptron(\n",
+       "  (fc1): Linear(in_features=1080, out_features=220, bias=True)\n",
+       "  (fc2): Linear(in_features=220, out_features=84, bias=True)\n",
+       "  (fc2b): Linear(in_features=84, out_features=500, bias=True)\n",
+       "  (fc2c): Linear(in_features=500, out_features=84, bias=True)\n",
+       "  (fc2d): Linear(in_features=84, out_features=84, bias=True)\n",
+       "  (fc3): Linear(in_features=84, out_features=2, bias=True)\n",
+       ")"
+      ]
+     },
+     "execution_count": 155,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "model = ANNMultilayerperceptron()\n",
+    "model"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 156,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "criterion = nn.CrossEntropyLoss()\n",
+    "optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)\n",
+    "#optimizer = torch.optim.Adadelta(model.parameters(), lr=0.001)\n",
+    "#optimizer = torch.optim.SGD(model.parameters(), lr=0.001)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 158,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Epoch 0 Batch: 37 Train Loss: 0.5482156276702881 Validation Loss: 0.785349428653717\n",
+      "Epoch 1 Batch: 37 Train Loss: 0.48908358812332153 Validation Loss: 10.221399307250977\n",
+      "Epoch 2 Batch: 37 Train Loss: 0.5197585821151733 Validation Loss: 0.7897891998291016\n",
+      "Epoch 3 Batch: 37 Train Loss: 0.4853547215461731 Validation Loss: 1.394559621810913\n",
+      "Epoch 4 Batch: 37 Train Loss: 0.4892922043800354 Validation Loss: 0.5764058232307434\n",
+      "Epoch 5 Batch: 37 Train Loss: 0.6638146638870239 Validation Loss: 0.7544931173324585\n",
+      "Epoch 6 Batch: 37 Train Loss: 0.4220401644706726 Validation Loss: 0.7470866441726685\n",
+      "Epoch 7 Batch: 37 Train Loss: 0.44250673055648804 Validation Loss: 1.5372095108032227\n",
+      "Epoch 8 Batch: 37 Train Loss: 0.5039094090461731 Validation Loss: 1.9515883922576904\n",
+      "Epoch 9 Batch: 37 Train Loss: 0.301666796207428 Validation Loss: 1.5623323917388916\n",
+      "Epoch 10 Batch: 37 Train Loss: 0.3378649353981018 Validation Loss: 1.2194945812225342\n",
+      "Epoch 11 Batch: 37 Train Loss: 0.25378188490867615 Validation Loss: 1.300980806350708\n",
+      "Epoch 12 Batch: 37 Train Loss: 0.639805018901825 Validation Loss: 1.1395552158355713\n",
+      "Epoch 13 Batch: 37 Train Loss: 0.6783220171928406 Validation Loss: 0.9483163952827454\n",
+      "Epoch 14 Batch: 37 Train Loss: 0.44601327180862427 Validation Loss: 3.3007137775421143\n",
+      "Epoch 15 Batch: 37 Train Loss: 0.465639591217041 Validation Loss: 0.7533040642738342\n",
+      "Epoch 16 Batch: 37 Train Loss: 0.4269081950187683 Validation Loss: 0.7154523134231567\n",
+      "Epoch 17 Batch: 37 Train Loss: 0.32400256395339966 Validation Loss: 2.5212364196777344\n",
+      "Epoch 18 Batch: 37 Train Loss: 0.5488093495368958 Validation Loss: 1.0315738916397095\n",
+      "Epoch 19 Batch: 37 Train Loss: 0.5967493057250977 Validation Loss: 1.8208280801773071\n",
+      "Epoch 20 Batch: 37 Train Loss: 0.4591737389564514 Validation Loss: 0.5970195531845093\n",
+      "Epoch 21 Batch: 37 Train Loss: 0.5062532424926758 Validation Loss: 10.155927658081055\n",
+      "Epoch 22 Batch: 37 Train Loss: 0.35393911600112915 Validation Loss: 6.915910243988037\n",
+      "Epoch 23 Batch: 37 Train Loss: 0.4491848349571228 Validation Loss: 2.076777935028076\n",
+      "Epoch 24 Batch: 37 Train Loss: 0.5336344242095947 Validation Loss: 1.7092180252075195\n",
+      "Epoch 25 Batch: 37 Train Loss: 0.5272760391235352 Validation Loss: 0.8516637086868286\n",
+      "Epoch 26 Batch: 37 Train Loss: 0.3463173508644104 Validation Loss: 2.554307460784912\n",
+      "Epoch 27 Batch: 37 Train Loss: 0.36279210448265076 Validation Loss: 1.1353038549423218\n",
+      "Epoch 28 Batch: 37 Train Loss: 0.35826048254966736 Validation Loss: 2.760803699493408\n",
+      "Epoch 29 Batch: 37 Train Loss: 0.43702831864356995 Validation Loss: 0.7811002731323242\n",
+      "Epoch 30 Batch: 37 Train Loss: 0.24415746331214905 Validation Loss: 1.9140548706054688\n",
+      "Epoch 31 Batch: 37 Train Loss: 0.3417481780052185 Validation Loss: 4.725893497467041\n",
+      "Epoch 32 Batch: 37 Train Loss: 0.49188271164894104 Validation Loss: 2.270404100418091\n",
+      "Epoch 33 Batch: 37 Train Loss: 0.20791809260845184 Validation Loss: 1.5956496000289917\n",
+      "Epoch 34 Batch: 37 Train Loss: 0.840151309967041 Validation Loss: 0.5528357028961182\n",
+      "Epoch 35 Batch: 37 Train Loss: 0.17202885448932648 Validation Loss: 2.684546947479248\n",
+      "Epoch 36 Batch: 37 Train Loss: 0.5952938795089722 Validation Loss: 0.9543641805648804\n",
+      "Epoch 37 Batch: 37 Train Loss: 0.5358439087867737 Validation Loss: 0.7028383016586304\n",
+      "Epoch 38 Batch: 37 Train Loss: 0.5896450281143188 Validation Loss: 0.667556643486023\n",
+      "Epoch 39 Batch: 37 Train Loss: 0.37400585412979126 Validation Loss: 2.113495349884033\n",
+      "Epoch 40 Batch: 37 Train Loss: 0.6413218379020691 Validation Loss: 1.3076337575912476\n",
+      "Epoch 41 Batch: 37 Train Loss: 0.5800779461860657 Validation Loss: 1.5005353689193726\n",
+      "Epoch 42 Batch: 37 Train Loss: 0.40714192390441895 Validation Loss: 3.4850239753723145\n",
+      "Epoch 43 Batch: 37 Train Loss: 0.29913339018821716 Validation Loss: 1.2991702556610107\n",
+      "Epoch 44 Batch: 37 Train Loss: 0.3358615040779114 Validation Loss: 9.716166496276855\n",
+      "Epoch 45 Batch: 37 Train Loss: 0.4723902642726898 Validation Loss: 0.6247226595878601\n",
+      "Epoch 46 Batch: 37 Train Loss: 0.2515336275100708 Validation Loss: 4.863682270050049\n",
+      "Epoch 47 Batch: 37 Train Loss: 0.45064011216163635 Validation Loss: 0.873319149017334\n",
+      "Epoch 48 Batch: 37 Train Loss: 0.2546733319759369 Validation Loss: 2.36735463142395\n",
+      "Epoch 49 Batch: 37 Train Loss: 0.5365272760391235 Validation Loss: 0.5677303075790405\n",
+      "Epoch 50 Batch: 37 Train Loss: 0.4485541880130768 Validation Loss: 1.1606909036636353\n",
+      "Epoch 51 Batch: 37 Train Loss: 0.47333288192749023 Validation Loss: 0.13701759278774261\n",
+      "Epoch 52 Batch: 37 Train Loss: 0.28207504749298096 Validation Loss: 1.8111140727996826\n",
+      "Epoch 53 Batch: 37 Train Loss: 0.5108175277709961 Validation Loss: 0.5609951615333557\n",
+      "Epoch 54 Batch: 37 Train Loss: 0.3103204369544983 Validation Loss: 1.7360597848892212\n",
+      "Epoch 55 Batch: 37 Train Loss: 0.5641381740570068 Validation Loss: 2.044443130493164\n",
+      "Epoch 56 Batch: 37 Train Loss: 0.2900743782520294 Validation Loss: 11.501714706420898\n",
+      "Epoch 57 Batch: 37 Train Loss: 0.2281096875667572 Validation Loss: 6.614021301269531\n",
+      "Epoch 58 Batch: 37 Train Loss: 0.3619900047779083 Validation Loss: 3.135695457458496\n",
+      "Epoch 59 Batch: 37 Train Loss: 0.46955007314682007 Validation Loss: 5.514169216156006\n",
+      "Epoch 60 Batch: 37 Train Loss: 0.20990078151226044 Validation Loss: 2.8159759044647217\n",
+      "Epoch 61 Batch: 37 Train Loss: 0.28100040555000305 Validation Loss: 2.544801950454712\n",
+      "Epoch 62 Batch: 37 Train Loss: 0.16172631084918976 Validation Loss: 0.3639978766441345\n",
+      "Epoch 63 Batch: 37 Train Loss: 0.36185407638549805 Validation Loss: 0.7744308710098267\n",
+      "Epoch 64 Batch: 37 Train Loss: 0.3983796238899231 Validation Loss: 1.3215258121490479\n",
+      "Epoch 65 Batch: 37 Train Loss: 0.32677173614501953 Validation Loss: 0.4753704071044922\n",
+      "Epoch 66 Batch: 37 Train Loss: 0.1716589480638504 Validation Loss: 10.730749130249023\n",
+      "Epoch 67 Batch: 37 Train Loss: 0.42803794145584106 Validation Loss: 6.33413028717041\n",
+      "Epoch 68 Batch: 37 Train Loss: 0.23572126030921936 Validation Loss: 8.086221694946289\n",
+      "Epoch 69 Batch: 37 Train Loss: 0.43532615900039673 Validation Loss: 0.7677993774414062\n",
+      "Epoch 70 Batch: 37 Train Loss: 0.21569211781024933 Validation Loss: 0.6067489385604858\n",
+      "Epoch 71 Batch: 37 Train Loss: 0.47089943289756775 Validation Loss: 1.3555779457092285\n",
+      "Epoch 72 Batch: 37 Train Loss: 0.3822091817855835 Validation Loss: 1.585458517074585\n",
+      "Epoch 73 Batch: 37 Train Loss: 0.41903242468833923 Validation Loss: 3.940091609954834\n",
+      "Epoch 74 Batch: 37 Train Loss: 0.2779555916786194 Validation Loss: 1.6483221054077148\n",
+      "Epoch 75 Batch: 37 Train Loss: 0.1186092346906662 Validation Loss: 12.945119857788086\n",
+      "Epoch 76 Batch: 37 Train Loss: 0.35651540756225586 Validation Loss: 1.1271653175354004\n",
+      "Epoch 77 Batch: 37 Train Loss: 0.26575377583503723 Validation Loss: 3.456726551055908\n",
+      "Epoch 78 Batch: 37 Train Loss: 0.2423626184463501 Validation Loss: 0.4821077287197113\n",
+      "Epoch 79 Batch: 37 Train Loss: 0.44824227690696716 Validation Loss: 0.5400644540786743\n",
+      "Epoch 80 Batch: 37 Train Loss: 0.25653260946273804 Validation Loss: 2.2451071739196777\n",
+      "Epoch 81 Batch: 37 Train Loss: 0.4470849931240082 Validation Loss: 1.420097827911377\n",
+      "Epoch 82 Batch: 37 Train Loss: 0.2804540991783142 Validation Loss: 0.7232017517089844\n",
+      "Epoch 83 Batch: 37 Train Loss: 0.1697106957435608 Validation Loss: 2.93481707572937\n",
+      "Epoch 84 Batch: 37 Train Loss: 0.16623874008655548 Validation Loss: 1.526031494140625\n",
+      "Epoch 85 Batch: 37 Train Loss: 0.2618076801300049 Validation Loss: 1.5361411571502686\n",
+      "Epoch 86 Batch: 37 Train Loss: 0.37414610385894775 Validation Loss: 4.9306206703186035\n",
+      "Epoch 87 Batch: 37 Train Loss: 0.20890164375305176 Validation Loss: 1.6848084926605225\n",
+      "Epoch 88 Batch: 37 Train Loss: 0.08358277380466461 Validation Loss: 7.394162178039551\n",
+      "Epoch 89 Batch: 37 Train Loss: 0.14714927971363068 Validation Loss: 2.400383949279785\n",
+      "Epoch 90 Batch: 37 Train Loss: 0.2456984966993332 Validation Loss: 4.410430431365967\n",
+      "Epoch 91 Batch: 37 Train Loss: 0.1855972558259964 Validation Loss: 3.8636317253112793\n",
+      "Epoch 92 Batch: 37 Train Loss: 0.2677789628505707 Validation Loss: 3.067034959793091\n",
+      "Epoch 93 Batch: 37 Train Loss: 0.37599650025367737 Validation Loss: 7.2680559158325195\n",
+      "Epoch 94 Batch: 37 Train Loss: 0.18437892198562622 Validation Loss: 1.9737638235092163\n",
+      "Epoch 95 Batch: 37 Train Loss: 0.06266029924154282 Validation Loss: 8.271184921264648\n",
+      "Epoch 96 Batch: 37 Train Loss: 0.17289824783802032 Validation Loss: 2.309722423553467\n",
+      "Epoch 97 Batch: 37 Train Loss: 0.572996973991394 Validation Loss: 0.8249210119247437\n",
+      "Epoch 98 Batch: 37 Train Loss: 0.20355387032032013 Validation Loss: 12.982765197753906\n",
+      "Epoch 99 Batch: 37 Train Loss: 0.24327452480793 Validation Loss: 2.893965005874634\n",
+      "Epoch 100 Batch: 37 Train Loss: 0.37173834443092346 Validation Loss: 2.0277743339538574\n",
+      "Epoch 101 Batch: 37 Train Loss: 0.20099958777427673 Validation Loss: 1.7782995700836182\n",
+      "Epoch 102 Batch: 37 Train Loss: 0.2296278476715088 Validation Loss: 5.207278728485107\n",
+      "Epoch 103 Batch: 37 Train Loss: 0.30580657720565796 Validation Loss: 3.12191104888916\n",
+      "Epoch 104 Batch: 37 Train Loss: 0.40019550919532776 Validation Loss: 0.25762075185775757\n",
+      "Epoch 105 Batch: 37 Train Loss: 0.1677689552307129 Validation Loss: 3.5412440299987793\n",
+      "Epoch 106 Batch: 37 Train Loss: 0.07607808709144592 Validation Loss: 6.751557350158691\n",
+      "Epoch 107 Batch: 37 Train Loss: 0.1794411838054657 Validation Loss: 2.2817423343658447\n",
+      "Epoch 108 Batch: 37 Train Loss: 0.1204628199338913 Validation Loss: 3.9662680625915527\n",
+      "Epoch 109 Batch: 37 Train Loss: 0.1490609347820282 Validation Loss: 4.504502296447754\n",
+      "Epoch 110 Batch: 37 Train Loss: 0.25021886825561523 Validation Loss: 2.82956600189209\n",
+      "Epoch 111 Batch: 37 Train Loss: 0.4120364785194397 Validation Loss: 2.6707282066345215\n",
+      "Epoch 112 Batch: 37 Train Loss: 0.20858578383922577 Validation Loss: 2.897519588470459\n",
+      "Epoch 113 Batch: 37 Train Loss: 0.12650711834430695 Validation Loss: 7.2655229568481445\n",
+      "Epoch 114 Batch: 37 Train Loss: 0.3032539188861847 Validation Loss: 4.9486918449401855\n",
+      "Epoch 115 Batch: 37 Train Loss: 0.723063051700592 Validation Loss: 2.0038399696350098\n",
+      "Epoch 116 Batch: 37 Train Loss: 0.33955106139183044 Validation Loss: 8.432024955749512\n",
+      "Epoch 117 Batch: 37 Train Loss: 0.2305242121219635 Validation Loss: 0.3963102698326111\n",
+      "Epoch 118 Batch: 37 Train Loss: 0.13286414742469788 Validation Loss: 11.823319435119629\n",
+      "Epoch 119 Batch: 37 Train Loss: 0.3441803753376007 Validation Loss: 3.996884822845459\n",
+      "Epoch 120 Batch: 37 Train Loss: 0.10922180116176605 Validation Loss: 11.944469451904297\n",
+      "Epoch 121 Batch: 37 Train Loss: 0.12151267379522324 Validation Loss: 6.558445930480957\n",
+      "Epoch 122 Batch: 37 Train Loss: 0.49387234449386597 Validation Loss: 4.693943023681641\n",
+      "Epoch 123 Batch: 37 Train Loss: 0.22556772828102112 Validation Loss: 12.464048385620117\n",
+      "Epoch 124 Batch: 37 Train Loss: 0.49108368158340454 Validation Loss: 0.5871716737747192\n",
+      "Epoch 125 Batch: 37 Train Loss: 0.15049274265766144 Validation Loss: 0.947725772857666\n",
+      "Epoch 126 Batch: 37 Train Loss: 0.10806606709957123 Validation Loss: 2.342539072036743\n",
+      "Epoch 127 Batch: 37 Train Loss: 0.19035863876342773 Validation Loss: 2.987471342086792\n",
+      "Epoch 128 Batch: 37 Train Loss: 0.10342653095722198 Validation Loss: 2.2384414672851562\n",
+      "Epoch 129 Batch: 37 Train Loss: 0.12394752353429794 Validation Loss: 9.567403793334961\n",
+      "Epoch 130 Batch: 37 Train Loss: 0.13493409752845764 Validation Loss: 6.350681304931641\n",
+      "Epoch 131 Batch: 37 Train Loss: 0.14391633868217468 Validation Loss: 3.3921756744384766\n",
+      "Epoch 132 Batch: 37 Train Loss: 0.1044234186410904 Validation Loss: 5.396409034729004\n",
+      "Epoch 133 Batch: 37 Train Loss: 0.2881557047367096 Validation Loss: 9.972692489624023\n",
+      "Epoch 134 Batch: 37 Train Loss: 0.278418630361557 Validation Loss: 1.5318386554718018\n",
+      "Epoch 135 Batch: 37 Train Loss: 0.2999802827835083 Validation Loss: 3.234100818634033\n",
+      "Epoch 136 Batch: 37 Train Loss: 0.11745598167181015 Validation Loss: 5.037964820861816\n",
+      "Epoch 137 Batch: 37 Train Loss: 0.12382683902978897 Validation Loss: 6.251718044281006\n",
+      "Epoch 138 Batch: 37 Train Loss: 0.14755865931510925 Validation Loss: 1.1153433322906494\n",
+      "Epoch 139 Batch: 37 Train Loss: 0.3764774203300476 Validation Loss: 15.338083267211914\n",
+      "Epoch 140 Batch: 37 Train Loss: 0.4183270335197449 Validation Loss: 3.541952610015869\n",
+      "Epoch 141 Batch: 37 Train Loss: 0.07648368179798126 Validation Loss: 3.520130157470703\n",
+      "Epoch 142 Batch: 37 Train Loss: 0.21785342693328857 Validation Loss: 6.8386664390563965\n",
+      "Epoch 143 Batch: 37 Train Loss: 0.23389139771461487 Validation Loss: 2.7862606048583984\n",
+      "Epoch 144 Batch: 37 Train Loss: 0.02019035443663597 Validation Loss: 29.495670318603516\n",
+      "Epoch 145 Batch: 37 Train Loss: 0.3009260892868042 Validation Loss: 2.180715560913086\n",
+      "Epoch 146 Batch: 37 Train Loss: 0.2854926288127899 Validation Loss: 0.8429921865463257\n",
+      "Epoch 147 Batch: 37 Train Loss: 0.020288512110710144 Validation Loss: 5.683625221252441\n",
+      "Epoch 148 Batch: 37 Train Loss: 0.15435919165611267 Validation Loss: 6.602965354919434\n",
+      "Epoch 149 Batch: 37 Train Loss: 0.18396498262882233 Validation Loss: 2.6358911991119385\n"
+     ]
+    }
+   ],
+   "source": [
+    "from ignite.metrics import Precision, Recall\n",
+    "from ignite.metrics import Precision ### LÄGG TILL IGNITE\n",
+    "from ignite.metrics import ConfusionMatrix\n",
+    "\n",
+    "train_precision = Precision()\n",
+    "train_recall = Recall()\n",
+    "test_precision = Precision()\n",
+    "test_recall = Recall()\n",
+    "\n",
+    "\n",
+    "# https://pytorch.org/ignite/metrics.html\n",
+    "\n",
+    "epochs = 150\n",
+    "\n",
+    "train_losses = []\n",
+    "test_losses = []\n",
+    "train_correct = []\n",
+    "test_correct = []\n",
+    "\n",
+    "# For loop epochs \n",
+    "\n",
+    "for i in range(epochs):\n",
+    "    trn_correct = 0\n",
+    "    tst_correct = 0 \n",
+    "\n",
+    "    # Train\n",
+    "    for b, (X_train, y_train) in enumerate(train_loader):\n",
+    "        \n",
+    "        # Skip iteration if batch size not equal to stated dim\n",
+    "        \n",
+    "        #print(X_train.shape, y_train.shape) \n",
+    "        b += 1\n",
+    "        \n",
+    "        y_pred = model(X_train.view(batch_size, -1))  # Flatten input\n",
+    "        lossTrain = criterion(y_pred, y_train)\n",
+    "\n",
+    "        # Perform backpropagnation\n",
+    "        optimizer.zero_grad()\n",
+    "        lossTrain.backward()\n",
+    "        optimizer.step()\n",
+    "\n",
+    "        # Calculate metrics\n",
+    "        predicted = torch.max(y_pred.data,1)[1]\n",
+    "        batch_corr = (predicted == y_train).sum()\n",
+    "        trn_correct += batch_corr\n",
+    "\n",
+    "        #calculate precision and recall\n",
+    "        train_precision.update((y_pred, y_train))\n",
+    "        train_recall.update((y_pred, y_train))\n",
+    "    \n",
+    "        #if b%2 == 0:\n",
+    "           #print(f\"Epoch {i} Batch: {b} Train Loss: {lossTrain.item()}\")\n",
+    "\n",
+    "    train_losses.append(lossTrain.data.item())\n",
+    "    train_correct.append(trn_correct)\n",
+    "\n",
+    "    # Test\n",
+    "    with torch.no_grad():\n",
+    "        for b, (X_test,y_test) in enumerate(test_loader):\n",
+    "            y_val = model(X_train.view(batch_size, -1))\n",
+    "\n",
+    "            predicted = torch.max(y_val.data,1)[1]\n",
+    "            tst_correct += (predicted == y_train).sum()\n",
+    "\n",
+    "    #calculate precision and recall\n",
+    "    test_precision.update((y_val, y_test))\n",
+    "    test_recall.update((y_val, y_test))\n",
+    "                    \n",
+    "    loss = criterion(y_val, y_test)\n",
+    "    test_losses.append(loss)\n",
+    "    test_correct.append(tst_correct)\n",
+    "\n",
+    "    #if b%2 == 0:\n",
+    "    print(f\"Epoch {i} Batch: {b} Train Loss: {lossTrain.item()} Validation Loss: {loss.item()}\")\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": []
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 159,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Train Precision: tensor([0.8521, 0.8104], dtype=torch.float64)\n",
+      "Train Recall: tensor([0.8198, 0.8440], dtype=torch.float64)\n",
+      "Test Precision tensor([0.5398, 0.4786], dtype=torch.float64)\n",
+      "Test recall: tensor([0.5113, 0.5071], dtype=torch.float64)\n"
+     ]
+    }
+   ],
+   "source": [
+    "print(f\"Train Precision: {train_precision.compute()}\")\n",
+    "print(f\"Train Recall: {train_recall.compute()}\")\n",
+    "print(f\"Test Precision {test_precision.compute()}\")\n",
+    "print(f\"Test recall: {test_recall.compute()}\")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": []
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 160,
+   "metadata": {},
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "<matplotlib.legend.Legend at 0x7f516658a310>"
+      ]
+     },
+     "execution_count": 160,
+     "metadata": {},
+     "output_type": "execute_result"
+    },
+    {
+     "data": {
+      "image/png": "iVBORw0KGgoAAAANSUhEUgAAAX4AAAEGCAYAAABiq/5QAAAAOXRFWHRTb2Z0d2FyZQBNYXRwbG90bGliIHZlcnNpb24zLjUuMSwgaHR0cHM6Ly9tYXRwbG90bGliLm9yZy/YYfK9AAAACXBIWXMAAAsTAAALEwEAmpwYAABZ3ElEQVR4nO2dd3hc1Zn/P2ekUe+23CR3XHA3bvTm0CG0hBJgDSFLSULZZCGQ/DaFJbtpC4SyATYYCBBC6DUxYGxjmo17792WrWKr15k5vz/OPXPvjGakGUmjGUnn8zx6pt85c3Xv9773+77nvUJKicFgMBj6Dq54D8BgMBgM3YsRfoPBYOhjGOE3GAyGPoYRfoPBYOhjGOE3GAyGPkZyvAcQCf3795cjRoyI9zAMBoOhR7Fy5cpyKWVh8PM9QvhHjBjBihUr4j0Mg8Fg6FEIIfaGet5YPQaDwdDHMMJvMBgMfYyYCb8QIk0IsVwIsVYIsVEI8Svr+ZFCiGVCiB1CiFeEECmxGoPBYDAYWhNLj78JOFtKWSuEcAOfCSH+AfwIeFhK+TchxJPAzcCfol14S0sLBw4coLGxsWtHbQhLWloaxcXFuN3ueA/FYDB0gpgJv1RNgGqth27rTwJnA9+xnn8e+CUdEP4DBw6QnZ3NiBEjEEJ0fsCGNpFSUlFRwYEDBxg5cmS8h2MwGDpBTD1+IUSSEGINUAp8BOwEKqWUHustB4CiMJ+9RQixQgixoqysrNXrjY2N9OvXz4h+NyGEoF+/fuYMy2DoBcRU+KWUXinlNKAYmA2Mj+KzT0spZ0opZxYWtipDBTCi382Y9W0w9A66papHSlkJLAJOAvKEENpiKgYOdscYDAaDISGoPwob34zrEGJZ1VMohMiz7qcD5wCbUQeAb1lvmwe8HasxxJKKigqmTZvGtGnTGDRoEEVFRf7Hzc3NbX52xYoV3HnnnVF934gRIygvL+/MkA0GQyKw/lV49UZorIrbEGJZ1TMYeF4IkYQ6wPxdSvmeEGIT8DchxIPAauCZGI4hZvTr1481a9YA8Mtf/pKsrCz+/d//3f+6x+MhOTn06p05cyYzZ87sjmEaDIZEw9Okbr0tcRtCzCJ+KeU6KeV0KeUUKeUkKeUD1vO7pJSzpZTHSSm/LaVsitUYupsbb7yR2267jTlz5nDvvfeyfPlyTjrpJKZPn87JJ5/M1q1bAVi8eDEXX3wxoA4a3/3udznzzDMZNWoUjz76aLvf89BDDzFp0iQmTZrEI488AkBdXR0XXXQRU6dOZdKkSbzyyisA3HfffUyYMIEpU6b4D0xlZWVceeWVzJo1i1mzZvH5558DsGTJEv9Zy/Tp06mpqenqVWQwGKTXuvXFbQg9oldPe/zq3Y1sOlTdpcucMCSHX1wyMerPHThwgC+++IKkpCSqq6tZunQpycnJfPzxx/z0pz/l9ddfb/WZLVu2sGjRImpqahg3bhy333572Fr5lStX8uyzz7Js2TKklMyZM4czzjiDXbt2MWTIEN5//30AqqqqqKio4M0332TLli0IIaisrATgrrvu4t/+7d849dRT2bdvH+eddx6bN2/mD3/4A0888QSnnHIKtbW1pKWlRf37DQZDO2jB93njNoReIfyJxLe//W2SkpIAJb7z5s1j+/btCCFoaQl9anfRRReRmppKamoqAwYM4MiRIxQXF4d872effcbll19OZmYmAFdccQVLly7l/PPP58c//jE/+clPuPjiiznttNPweDykpaVx8803c/HFF/vPMj7++GM2bdrkX2Z1dTW1tbWccsop/OhHP+K6667jiiuuCDsGg8HQCXyW8Esj/J2iI5F5rNCCDPAf//EfnHXWWbz55pvs2bOHM888M+RnUlNT/feTkpLweDwh39cWY8eOZdWqVXzwwQf8v//3/5g7dy4///nPWb58OQsXLuS1117j8ccf55NPPsHn8/HVV1+1iujvu+8+LrroIj744ANOOeUUFixYwPjxEVfgGgyGSNCCH8eI3zRpiyFVVVUUFan5ac8991yXLPO0007jrbfeor6+nrq6Ot58801OO+00Dh06REZGBtdffz333HMPq1atora2lqqqKi688EIefvhh1q5dC8C5557LY4895l+mTlLv3LmTyZMn85Of/IRZs2axZcuWLhmzwWBwoAXfRPy9k3vvvZd58+bx4IMPctFFF3XJMk844QRuvPFGZs+eDcD3vvc9pk+fzoIFC7jnnntwuVy43W7+9Kc/UVNTw6WXXkpjYyNSSh566CEAHn30UX7wgx8wZcoUPB4Pp59+Ok8++SSPPPIIixYtwuVyMXHiRC644IIuGbPBYHDgj/jjl9wVqqVOYjNz5kwZfCGWzZs3c/zxx8dpRH0Xs94Nhk7y0S/g80fgB8uh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",
+      "text/plain": [
+       "<Figure size 432x288 with 1 Axes>"
+      ]
+     },
+     "metadata": {
+      "needs_background": "light"
+     },
+     "output_type": "display_data"
+    }
+   ],
+   "source": [
+    "\n",
+    "plt.plot(train_losses, label=\"Train losses\")\n",
+    "plt.plot(test_losses, label= \"Test losses\")\n",
+    "plt.xlabel(\"Epoch\")\n",
+    "plt.ylabel(\"Loss\")\n",
+    "plt.legend()"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Predict a state of a single sample from test_set"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 161,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Random sample 37 selected with state 1. Model predict state is 1\n",
+      "Random sample 156 selected with state 0. Model predict state is 1\n",
+      "Random sample 145 selected with state 0. Model predict state is 1\n",
+      "Random sample 23 selected with state 1. Model predict state is 0\n",
+      "Random sample 53 selected with state 1. Model predict state is 0\n",
+      "Random sample 317 selected with state 0. Model predict state is 1\n",
+      "Random sample 129 selected with state 0. Model predict state is 1\n",
+      "Random sample 117 selected with state 1. Model predict state is 0\n",
+      "Random sample 360 selected with state 1. Model predict state is 0\n",
+      "Random sample 273 selected with state 1. Model predict state is 1\n",
+      "Random sample 164 selected with state 1. Model predict state is 1\n",
+      "Random sample 24 selected with state 0. Model predict state is 0\n",
+      "Random sample 386 selected with state 1. Model predict state is 1\n",
+      "Random sample 285 selected with state 1. Model predict state is 0\n",
+      "Random sample 249 selected with state 1. Model predict state is 1\n",
+      "Random sample 268 selected with state 0. Model predict state is 0\n",
+      "Random sample 58 selected with state 0. Model predict state is 1\n",
+      "Random sample 279 selected with state 0. Model predict state is 0\n",
+      "Random sample 300 selected with state 0. Model predict state is 1\n",
+      "Random sample 119 selected with state 1. Model predict state is 0\n",
+      "Random sample 285 selected with state 1. Model predict state is 0\n",
+      "Random sample 298 selected with state 1. Model predict state is 0\n",
+      "Random sample 133 selected with state 1. Model predict state is 1\n",
+      "Random sample 63 selected with state 1. Model predict state is 0\n",
+      "Random sample 55 selected with state 1. Model predict state is 0\n",
+      "Random sample 201 selected with state 1. Model predict state is 0\n",
+      "Random sample 148 selected with state 0. Model predict state is 1\n",
+      "Random sample 24 selected with state 0. Model predict state is 0\n",
+      "Random sample 158 selected with state 0. Model predict state is 1\n",
+      "Random sample 288 selected with state 0. Model predict state is 0\n",
+      "Random sample 318 selected with state 1. Model predict state is 0\n",
+      "Random sample 375 selected with state 1. Model predict state is 0\n",
+      "Random sample 52 selected with state 0. Model predict state is 1\n",
+      "Random sample 257 selected with state 0. Model predict state is 0\n",
+      "Random sample 198 selected with state 0. Model predict state is 1\n",
+      "Random sample 91 selected with state 1. Model predict state is 0\n",
+      "Random sample 338 selected with state 0. Model predict state is 1\n",
+      "Random sample 83 selected with state 0. Model predict state is 0\n",
+      "Random sample 73 selected with state 0. Model predict state is 0\n",
+      "Random sample 135 selected with state 0. Model predict state is 1\n",
+      "Random sample 104 selected with state 0. Model predict state is 1\n",
+      "Random sample 171 selected with state 0. Model predict state is 0\n",
+      "Random sample 379 selected with state 0. Model predict state is 1\n",
+      "Random sample 285 selected with state 1. Model predict state is 0\n",
+      "Random sample 323 selected with state 1. Model predict state is 0\n",
+      "Random sample 50 selected with state 0. Model predict state is 1\n",
+      "Random sample 225 selected with state 1. Model predict state is 1\n",
+      "Random sample 44 selected with state 0. Model predict state is 1\n",
+      "Random sample 171 selected with state 0. Model predict state is 0\n",
+      "Random sample 179 selected with state 1. Model predict state is 0\n",
+      "Random sample 387 selected with state 0. Model predict state is 0\n",
+      "Random sample 224 selected with state 1. Model predict state is 0\n",
+      "Random sample 14 selected with state 1. Model predict state is 0\n",
+      "Random sample 336 selected with state 1. Model predict state is 0\n",
+      "Random sample 378 selected with state 0. Model predict state is 0\n",
+      "Random sample 115 selected with state 0. Model predict state is 0\n",
+      "Random sample 66 selected with state 0. Model predict state is 1\n",
+      "Random sample 28 selected with state 0. Model predict state is 1\n",
+      "Random sample 91 selected with state 1. Model predict state is 0\n",
+      "Random sample 316 selected with state 0. Model predict state is 0\n",
+      "Random sample 161 selected with state 0. Model predict state is 1\n",
+      "Random sample 98 selected with state 0. Model predict state is 1\n",
+      "Random sample 315 selected with state 0. Model predict state is 1\n",
+      "Random sample 323 selected with state 1. Model predict state is 0\n",
+      "Random sample 326 selected with state 0. Model predict state is 1\n",
+      "Random sample 279 selected with state 0. Model predict state is 0\n",
+      "Random sample 127 selected with state 0. Model predict state is 0\n",
+      "Random sample 330 selected with state 1. Model predict state is 1\n",
+      "Random sample 88 selected with state 0. Model predict state is 0\n",
+      "Random sample 287 selected with state 1. Model predict state is 0\n",
+      "Random sample 7 selected with state 1. Model predict state is 0\n",
+      "Random sample 357 selected with state 1. Model predict state is 0\n",
+      "Random sample 276 selected with state 1. Model predict state is 1\n",
+      "Random sample 170 selected with state 0. Model predict state is 0\n",
+      "Random sample 91 selected with state 1. Model predict state is 0\n",
+      "Random sample 193 selected with state 0. Model predict state is 1\n",
+      "Random sample 6 selected with state 1. Model predict state is 1\n",
+      "Random sample 103 selected with state 0. Model predict state is 0\n",
+      "Random sample 82 selected with state 1. Model predict state is 0\n",
+      "Random sample 108 selected with state 1. Model predict state is 1\n",
+      "Random sample 44 selected with state 0. Model predict state is 1\n",
+      "Random sample 213 selected with state 1. Model predict state is 0\n",
+      "Random sample 314 selected with state 1. Model predict state is 1\n",
+      "Random sample 361 selected with state 0. Model predict state is 1\n",
+      "Random sample 104 selected with state 0. Model predict state is 1\n",
+      "Random sample 223 selected with state 1. Model predict state is 0\n",
+      "Random sample 16 selected with state 1. Model predict state is 1\n",
+      "Random sample 358 selected with state 0. Model predict state is 1\n",
+      "Random sample 37 selected with state 1. Model predict state is 1\n",
+      "Random sample 239 selected with state 0. Model predict state is 1\n",
+      "Random sample 118 selected with state 1. Model predict state is 0\n",
+      "Random sample 102 selected with state 0. Model predict state is 1\n",
+      "Random sample 49 selected with state 1. Model predict state is 1\n",
+      "Random sample 305 selected with state 1. Model predict state is 1\n",
+      "Random sample 359 selected with state 1. Model predict state is 0\n",
+      "Random sample 277 selected with state 1. Model predict state is 0\n",
+      "Random sample 91 selected with state 1. Model predict state is 0\n",
+      "Random sample 118 selected with state 1. Model predict state is 0\n",
+      "Random sample 238 selected with state 1. Model predict state is 1\n",
+      "Random sample 158 selected with state 0. Model predict state is 1\n"
+     ]
+    }
+   ],
+   "source": [
+    "import numpy as np\n",
+    "for _ in range(100):\n",
+    "    # Select random sample\n",
+    "    i = np.random.randint(1,len(test_set))\n",
+    "    x = test_set[i][0]\n",
+    "    y = test_set[i][1]\n",
+    "\n",
+    "\n",
+    "    # Evaluate on sample\n",
+    "    model.eval()\n",
+    "    with torch.no_grad():\n",
+    "        new_pred =model(x.view(1,-1))\n",
+    "        pred_int = int(torch.max(new_pred.data,1)[1])\n",
+    "    print(f\"Random sample {i} selected with state {y}. Model predict state is {pred_int}\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Predict a state of a single sample from train_set"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 162,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Random sample 91 selected with state 1. Model predict state is 1\n",
+      "Random sample 1477 selected with state 0. Model predict state is 0\n",
+      "Random sample 945 selected with state 0. Model predict state is 0\n",
+      "Random sample 308 selected with state 0. Model predict state is 0\n",
+      "Random sample 930 selected with state 1. Model predict state is 1\n",
+      "Random sample 255 selected with state 0. Model predict state is 0\n",
+      "Random sample 1161 selected with state 1. Model predict state is 1\n",
+      "Random sample 281 selected with state 0. Model predict state is 0\n",
+      "Random sample 1433 selected with state 0. Model predict state is 0\n",
+      "Random sample 1340 selected with state 0. Model predict state is 0\n",
+      "Random sample 1540 selected with state 0. Model predict state is 0\n",
+      "Random sample 1152 selected with state 1. Model predict state is 1\n",
+      "Random sample 337 selected with state 0. Model predict state is 0\n",
+      "Random sample 1466 selected with state 1. Model predict state is 0\n",
+      "Random sample 1040 selected with state 0. Model predict state is 0\n",
+      "Random sample 1521 selected with state 0. Model predict state is 0\n",
+      "Random sample 1043 selected with state 0. Model predict state is 0\n",
+      "Random sample 670 selected with state 0. Model predict state is 0\n",
+      "Random sample 502 selected with state 0. Model predict state is 0\n",
+      "Random sample 1384 selected with state 0. Model predict state is 1\n",
+      "Random sample 231 selected with state 0. Model predict state is 0\n",
+      "Random sample 1267 selected with state 1. Model predict state is 1\n",
+      "Random sample 275 selected with state 1. Model predict state is 1\n",
+      "Random sample 502 selected with state 0. Model predict state is 0\n",
+      "Random sample 616 selected with state 1. Model predict state is 1\n",
+      "Random sample 737 selected with state 1. Model predict state is 1\n",
+      "Random sample 662 selected with state 1. Model predict state is 1\n",
+      "Random sample 1263 selected with state 1. Model predict state is 1\n",
+      "Random sample 853 selected with state 1. Model predict state is 1\n",
+      "Random sample 1228 selected with state 0. Model predict state is 0\n",
+      "Random sample 1338 selected with state 0. Model predict state is 0\n",
+      "Random sample 1424 selected with state 1. Model predict state is 1\n",
+      "Random sample 830 selected with state 0. Model predict state is 0\n",
+      "Random sample 449 selected with state 1. Model predict state is 1\n",
+      "Random sample 410 selected with state 0. Model predict state is 0\n",
+      "Random sample 315 selected with state 1. Model predict state is 1\n",
+      "Random sample 357 selected with state 0. Model predict state is 0\n",
+      "Random sample 220 selected with state 1. Model predict state is 1\n",
+      "Random sample 394 selected with state 1. Model predict state is 1\n",
+      "Random sample 838 selected with state 0. Model predict state is 0\n",
+      "Random sample 542 selected with state 0. Model predict state is 0\n",
+      "Random sample 1310 selected with state 1. Model predict state is 1\n",
+      "Random sample 1010 selected with state 0. Model predict state is 0\n",
+      "Random sample 1519 selected with state 1. Model predict state is 1\n",
+      "Random sample 104 selected with state 1. Model predict state is 1\n",
+      "Random sample 245 selected with state 0. Model predict state is 0\n",
+      "Random sample 515 selected with state 0. Model predict state is 0\n",
+      "Random sample 1440 selected with state 0. Model predict state is 0\n",
+      "Random sample 1318 selected with state 0. Model predict state is 0\n",
+      "Random sample 1272 selected with state 0. Model predict state is 0\n",
+      "Random sample 1338 selected with state 0. Model predict state is 0\n",
+      "Random sample 407 selected with state 0. Model predict state is 0\n",
+      "Random sample 1151 selected with state 1. Model predict state is 1\n",
+      "Random sample 1201 selected with state 1. Model predict state is 1\n",
+      "Random sample 1369 selected with state 0. Model predict state is 0\n",
+      "Random sample 511 selected with state 1. Model predict state is 1\n",
+      "Random sample 904 selected with state 1. Model predict state is 1\n",
+      "Random sample 660 selected with state 0. Model predict state is 0\n",
+      "Random sample 859 selected with state 0. Model predict state is 0\n",
+      "Random sample 321 selected with state 1. Model predict state is 1\n",
+      "Random sample 1481 selected with state 0. Model predict state is 1\n",
+      "Random sample 1422 selected with state 0. Model predict state is 0\n",
+      "Random sample 156 selected with state 1. Model predict state is 1\n",
+      "Random sample 879 selected with state 0. Model predict state is 1\n",
+      "Random sample 996 selected with state 1. Model predict state is 1\n",
+      "Random sample 569 selected with state 0. Model predict state is 0\n",
+      "Random sample 516 selected with state 0. Model predict state is 0\n",
+      "Random sample 1157 selected with state 1. Model predict state is 1\n",
+      "Random sample 259 selected with state 1. Model predict state is 1\n",
+      "Random sample 754 selected with state 0. Model predict state is 0\n",
+      "Random sample 1302 selected with state 0. Model predict state is 0\n",
+      "Random sample 419 selected with state 0. Model predict state is 0\n",
+      "Random sample 484 selected with state 1. Model predict state is 1\n",
+      "Random sample 565 selected with state 1. Model predict state is 1\n",
+      "Random sample 185 selected with state 0. Model predict state is 0\n",
+      "Random sample 935 selected with state 0. Model predict state is 0\n",
+      "Random sample 410 selected with state 0. Model predict state is 0\n",
+      "Random sample 183 selected with state 1. Model predict state is 1\n",
+      "Random sample 373 selected with state 0. Model predict state is 0\n",
+      "Random sample 486 selected with state 1. Model predict state is 1\n",
+      "Random sample 180 selected with state 1. Model predict state is 1\n",
+      "Random sample 1486 selected with state 1. Model predict state is 1\n",
+      "Random sample 14 selected with state 0. Model predict state is 0\n",
+      "Random sample 1492 selected with state 1. Model predict state is 1\n",
+      "Random sample 177 selected with state 0. Model predict state is 0\n",
+      "Random sample 787 selected with state 1. Model predict state is 1\n",
+      "Random sample 1319 selected with state 1. Model predict state is 1\n",
+      "Random sample 1062 selected with state 1. Model predict state is 1\n",
+      "Random sample 965 selected with state 1. Model predict state is 1\n",
+      "Random sample 1337 selected with state 0. Model predict state is 0\n",
+      "Random sample 193 selected with state 1. Model predict state is 1\n",
+      "Random sample 721 selected with state 0. Model predict state is 0\n",
+      "Random sample 47 selected with state 1. Model predict state is 1\n",
+      "Random sample 1084 selected with state 0. Model predict state is 0\n",
+      "Random sample 1351 selected with state 1. Model predict state is 1\n",
+      "Random sample 384 selected with state 1. Model predict state is 0\n",
+      "Random sample 762 selected with state 1. Model predict state is 1\n",
+      "Random sample 553 selected with state 1. Model predict state is 0\n",
+      "Random sample 68 selected with state 1. Model predict state is 1\n",
+      "Random sample 1251 selected with state 0. Model predict state is 0\n"
+     ]
+    }
+   ],
+   "source": [
+    "import numpy as np\n",
+    "for _ in range(100):\n",
+    "    # Select random sample\n",
+    "    i = np.random.randint(1,len(train_set))\n",
+    "    x = train_set[i][0]\n",
+    "    y = train_set[i][1]\n",
+    "\n",
+    "\n",
+    "    # Evaluate on sample\n",
+    "    model.eval()\n",
+    "    with torch.no_grad():\n",
+    "        new_pred =model(x.view(1,-1))\n",
+    "        pred_int = int(torch.max(new_pred.data,1)[1])\n",
+    "    print(f\"Random sample {i} selected with state {y}. Model predict state is {pred_int}\")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "test\n"
+     ]
+    }
+   ],
+   "source": [
+    "print(\"test\")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": []
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": []
+  }
+ ],
+ "metadata": {
+  "interpreter": {
+   "hash": "3a5e77589088e21c3c0d4cdd96e34c3b18a8ad86691c2f192753c63150bee9a2"
+  },
+  "kernelspec": {
+   "display_name": "Python 3.9.10 64-bit (conda)",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 3
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython3",
+   "version": "3.9.10"
+  },
+  "orig_nbformat": 4
+ },
+ "nbformat": 4,
+ "nbformat_minor": 2
+}

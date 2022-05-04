@@ -1,0 +1,14 @@
+README.md
+pyproject.toml
+setup.cfg
+setup.py
+src/edec/__init__.py
+src/edec/afterprocessing.py
+src/edec/modelling_functions.py
+src/edec/preprocessing.py
+src/edec/read_data.py
+src/edec.egg-info/PKG-INFO
+src/edec.egg-info/SOURCES.txt
+src/edec.egg-info/dependency_links.txt
+src/edec.egg-info/requires.txt
+src/edec.egg-info/top_level.txt
